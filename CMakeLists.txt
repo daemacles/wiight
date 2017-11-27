@@ -36,6 +36,7 @@ add_subdirectory( third_party/backward-cpp )
 #endif (USE_MY_LIBRARY)
 
 include_directories( include )
+include_directories( third_party/sqlite_modern_cpp/hdr )
 
 set (LIBS 
   backward-cpp

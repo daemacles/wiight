@@ -10,12 +10,15 @@
 #include <xwiimote.h>
 
 #include "logging.h"
+#include "sqlite_modern_cpp.h"
 
 using namespace std;
 using namespace Eigen;
 
 #define CHECKSQL(X, db, msg) do { int rc = X; if( rc != SQLITE_OK ) { \
   FATAL( "{}: {}", msg, sqlite3_errmsg( db )); }} while(0)
+
+static constexpr const char *DATABASE = "/tmp/db.sqlite";
 
 static xwii_iface* WaitForBalanceBoard ()
 {
@@ -83,16 +86,16 @@ static void HandleBalanceBoard( const ::xwii_event &event,
   std::cout << std::flush;
 }
 
-VectorXd GetCalibrationCoefficients ()
+VectorXd GetCalibrationCoefficients ( sqlite::database &db )
 {
-  // Compute calibration coefficients
+  vector<double> scale_values_raw;
+  vector<double> wii_values_raw;
 
-  vector<double> scale_values_raw{ 71.5, 52., 193.5, 141., 146.5, 203., 145.5,
-    173.5, 143.5 };
-  vector<double> wii_values_raw{ 63., 43.65, 185.5, 133.2, 138.6, 194.5, 137.5,
-    165.2, 135.6 };
-
-  assert( scale_values_raw.size() == wii_values_raw.size() );
+  db << "SELECT scale, wii FROM calibration;"
+    >> [&]( double scale, double wii ) {
+      scale_values_raw.push_back( scale );
+      wii_values_raw.push_back( wii );
+    };
 
   VectorXd scale_values{ scale_values_raw.size() };
   VectorXd wii_values{ wii_values_raw.size() };
@@ -103,6 +106,7 @@ VectorXd GetCalibrationCoefficients ()
     wii_values( idx ) = wii_values_raw[ idx ];
   }
 
+  // Compute calibration coefficients
   MatrixXd A = MatrixXd::Ones( scale_values.rows(), 3 );
   A.col(0) = wii_values.asDiagonal()*wii_values;
   A.col(1) = wii_values;
@@ -110,7 +114,7 @@ VectorXd GetCalibrationCoefficients ()
   return (A.adjoint() * A).llt().solve( A.adjoint() * scale_values );
 }
 
-static void Run( ::xwii_iface *iface )
+static void Run( sqlite::database &db, ::xwii_iface *iface )
 {
   ::xwii_event event;
   	int ret = 0, fds_num;
@@ -129,7 +133,7 @@ static void Run( ::xwii_iface *iface )
 		ERROR("Cannot initialize hotplug watch descriptor");
   }
 
-  VectorXd coefs = GetCalibrationCoefficients();
+  VectorXd coefs = GetCalibrationCoefficients( db );
 
 	while (true) {
     ret = poll(fds, fds_num, -1);
@@ -199,28 +203,13 @@ static void Run( ::xwii_iface *iface )
   }
 }
 
-void LoadDefaultCalibration ()
+void LoadDefaultCalibration ( sqlite::database &db )
 {
-  sqlite3 *db;
-
-  int rc = sqlite3_open( "/tmp/db.sqlite", &db );
-  if( rc != SQLITE_OK )
-  {
-    FATAL( "Couldn't open database: {}", sqlite3_errmsg( db ));
-  }
-
-  string sql = R"(
-  DROP TABLE IF EXISTS calibration;
-  CREATE TABLE calibration( id INTEGER PRIMARY KEY, scale DOUBLE, wii DOUBLE );
-  )";
-
-  char *err_msg = nullptr;
-  rc = sqlite3_exec( db, sql.c_str(), 0, 0, &err_msg );
-  if( rc != SQLITE_OK )
-  {
-    FATAL( "Couldn't create table: {}", sqlite3_errmsg( db ));
-    sqlite3_free( err_msg );
-  }
+  db << "DROP TABLE IF EXISTS calibration;";
+  db << "CREATE TABLE calibration( "
+    "id INTEGER PRIMARY KEY,"
+    "scale DOUBLE,"
+    "wii DOUBLE );";
 
   vector<double> scale_values{ 71.5, 52., 193.5, 141., 146.5, 203., 145.5,
     173.5, 143.5 };
@@ -228,66 +217,29 @@ void LoadDefaultCalibration ()
     165.2, 135.6 };
   assert( scale_values.size() == wii_values.size() );
 
-  sql = "INSERT INTO calibration(scale, wii) VALUES (?, ?);";
-  sqlite3_stmt *res;
-  rc = sqlite3_prepare_v2( db, sql.c_str(), -1, &res, 0 );
-  if( rc != SQLITE_OK )
-  {
-    FATAL( "Failed to prepare statement: {}", sqlite3_errmsg( db ));
-  }
-
   for( size_t idx=0; idx < scale_values.size(); ++idx )
   {
-    sqlite3_bind_double( res, 1, scale_values[idx] );
-    sqlite3_bind_double( res, 2, wii_values[idx] );
-    rc = sqlite3_step( res );
-    if( rc != SQLITE_DONE )
-    {
-      FATAL( "Can't insert data: {}", sqlite3_errmsg( db ));
-    }
-    sqlite3_reset( res );
+    db << "INSERT INTO calibration (scale, wii) values (?, ?);"
+      << scale_values[idx]
+      << wii_values[idx];
   }
-
-  sqlite3_finalize( res );
-  sqlite3_close( db );
 }
 
-void Sqlite()
+sqlite::database Sqlite()
 {
-  sqlite3 *db;
-  sqlite3_stmt *res;
-
-  int rc = sqlite3_open( "/tmp/db.sqlite", &db );
-  if( rc != SQLITE_OK )
-  {
-    FATAL( "Couldn't open database: {}", sqlite3_errmsg( db ));
-  }
-
-  rc = sqlite3_prepare_v2( db, "SELECT SQLITE_VERSION()", -1, &res, 0 );
-  if( rc != SQLITE_OK )
-  {
-    FATAL( "Couldn't fetch data: {}", sqlite3_errmsg( db ));
-  }
-
-  rc = sqlite3_step( res );
-
-  if( rc == SQLITE_ROW )
-  {
-    INFO( "Using SQlite3 version {}", sqlite3_column_text( res, 0 ));
-  }
-
-  sqlite3_finalize( res );
-  sqlite3_close( db );
-
+  sqlite::database db( DATABASE );
+  string version;
+  db << "SELECT SQLITE_VERSION();"
+    >> []( string version ) {
+      INFO( "Using SQLite3 version {}", version );
+    };
+  return db;
 }
 
 int main(int argc, char **argv) {
   // DELETE THESE.  Used to suppress unused variable warnings.
   (void)argc;
   (void)argv;
-
-  Sqlite();
-  LoadDefaultCalibration();
 
   auto iface = WaitForBalanceBoard();
 
@@ -302,7 +254,9 @@ int main(int argc, char **argv) {
     FATAL( "Can't open interface" );
   };
 
-  Run( iface );
+  auto db = Sqlite();
+  LoadDefaultCalibration( db );
+  Run( db, iface );
 
   return 0;
 }
