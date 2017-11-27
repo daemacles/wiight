@@ -1,0 +1,11 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/imageworks/pystring.git
+	branch = master
+	commit = c2de99deb4f0bd13751f8436400b5e8662301769
+	parent = 985a481e33ab233e13cd8d35b3eb905ae46238b7
+	cmdver = 0.3.1
