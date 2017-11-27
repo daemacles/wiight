@@ -43,6 +43,7 @@ set (LIBS
   pthread
   pystring
   spdlog
+  sqlite3
   xwiimote
   Eigen3::Eigen
   )

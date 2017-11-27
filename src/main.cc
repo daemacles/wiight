@@ -1,17 +1,21 @@
 #include <cassert>
 #include <poll.h>
-#include <xwiimote.h>
 
 #include <iostream>
 #include <string>
 #include <vector>
 
 #include <Eigen/Dense>
+#include <sqlite3.h>
+#include <xwiimote.h>
 
 #include "logging.h"
 
 using namespace std;
 using namespace Eigen;
+
+#define CHECKSQL(X, db, msg) do { int rc = X; if( rc != SQLITE_OK ) { \
+  FATAL( "{}: {}", msg, sqlite3_errmsg( db )); }} while(0)
 
 static xwii_iface* WaitForBalanceBoard ()
 {
@@ -195,10 +199,95 @@ static void Run( ::xwii_iface *iface )
   }
 }
 
+void LoadDefaultCalibration ()
+{
+  sqlite3 *db;
+
+  int rc = sqlite3_open( "/tmp/db.sqlite", &db );
+  if( rc != SQLITE_OK )
+  {
+    FATAL( "Couldn't open database: {}", sqlite3_errmsg( db ));
+  }
+
+  string sql = R"(
+  DROP TABLE IF EXISTS calibration;
+  CREATE TABLE calibration( id INTEGER PRIMARY KEY, scale DOUBLE, wii DOUBLE );
+  )";
+
+  char *err_msg = nullptr;
+  rc = sqlite3_exec( db, sql.c_str(), 0, 0, &err_msg );
+  if( rc != SQLITE_OK )
+  {
+    FATAL( "Couldn't create table: {}", sqlite3_errmsg( db ));
+    sqlite3_free( err_msg );
+  }
+
+  vector<double> scale_values{ 71.5, 52., 193.5, 141., 146.5, 203., 145.5,
+    173.5, 143.5 };
+  vector<double> wii_values{ 63., 43.65, 185.5, 133.2, 138.6, 194.5, 137.5,
+    165.2, 135.6 };
+  assert( scale_values.size() == wii_values.size() );
+
+  sql = "INSERT INTO calibration(scale, wii) VALUES (?, ?);";
+  sqlite3_stmt *res;
+  rc = sqlite3_prepare_v2( db, sql.c_str(), -1, &res, 0 );
+  if( rc != SQLITE_OK )
+  {
+    FATAL( "Failed to prepare statement: {}", sqlite3_errmsg( db ));
+  }
+
+  for( size_t idx=0; idx < scale_values.size(); ++idx )
+  {
+    sqlite3_bind_double( res, 1, scale_values[idx] );
+    sqlite3_bind_double( res, 2, wii_values[idx] );
+    rc = sqlite3_step( res );
+    if( rc != SQLITE_DONE )
+    {
+      FATAL( "Can't insert data: {}", sqlite3_errmsg( db ));
+    }
+    sqlite3_reset( res );
+  }
+
+  sqlite3_finalize( res );
+  sqlite3_close( db );
+}
+
+void Sqlite()
+{
+  sqlite3 *db;
+  sqlite3_stmt *res;
+
+  int rc = sqlite3_open( "/tmp/db.sqlite", &db );
+  if( rc != SQLITE_OK )
+  {
+    FATAL( "Couldn't open database: {}", sqlite3_errmsg( db ));
+  }
+
+  rc = sqlite3_prepare_v2( db, "SELECT SQLITE_VERSION()", -1, &res, 0 );
+  if( rc != SQLITE_OK )
+  {
+    FATAL( "Couldn't fetch data: {}", sqlite3_errmsg( db ));
+  }
+
+  rc = sqlite3_step( res );
+
+  if( rc == SQLITE_ROW )
+  {
+    INFO( "Using SQlite3 version {}", sqlite3_column_text( res, 0 ));
+  }
+
+  sqlite3_finalize( res );
+  sqlite3_close( db );
+
+}
+
 int main(int argc, char **argv) {
   // DELETE THESE.  Used to suppress unused variable warnings.
   (void)argc;
   (void)argv;
+
+  Sqlite();
+  LoadDefaultCalibration();
 
   auto iface = WaitForBalanceBoard();
 
