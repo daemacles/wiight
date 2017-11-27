@@ -1,14 +1,17 @@
+#include <cassert>
 #include <poll.h>
 #include <xwiimote.h>
 
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include <Eigen/Dense>
 
 #include "logging.h"
 
 using namespace std;
+using namespace Eigen;
 
 static xwii_iface* WaitForBalanceBoard ()
 {
@@ -56,7 +59,8 @@ static xwii_iface* WaitForBalanceBoard ()
   return nullptr;
 }
 
-static void HandleBalanceBoard( const ::xwii_event &event )
+static void HandleBalanceBoard( const ::xwii_event &event,
+                               const VectorXd &coefs )
 {
 //        tl = event.get_abs(2)[0]
 //        tr = event.get_abs(0)[0]
@@ -67,10 +71,39 @@ static void HandleBalanceBoard( const ::xwii_event &event )
     event.v.abs[0].x, event.v.abs[1].x, event.v.abs[2].x, event.v.abs[3].x;
 
   values = values / 100.0 * 2.20462;
+  double weight = values.sum();
+  weight = coefs[0]*weight*weight + coefs[1]*weight + coefs[2];
 
-  fmt::print( "Values: {:6.2f} {:6.2f} {:6.2f} {:6.2f}\r",
-       values[0], values[1], values[2], values[3] );
+  fmt::print( "Values: {:6.2f} <== {:6.2f} {:6.2f} {:6.2f} {:6.2f}\r",
+       weight, values[0], values[1], values[2], values[3] );
   std::cout << std::flush;
+}
+
+VectorXd GetCalibrationCoefficients ()
+{
+  // Compute calibration coefficients
+
+  vector<double> scale_values_raw{ 71.5, 52., 193.5, 141., 146.5, 203., 145.5,
+    173.5, 143.5 };
+  vector<double> wii_values_raw{ 63., 43.65, 185.5, 133.2, 138.6, 194.5, 137.5,
+    165.2, 135.6 };
+
+  assert( scale_values_raw.size() == wii_values_raw.size() );
+
+  VectorXd scale_values{ scale_values_raw.size() };
+  VectorXd wii_values{ wii_values_raw.size() };
+
+  for( size_t idx=0; idx < scale_values_raw.size(); ++idx )
+  {
+    scale_values( idx ) = scale_values_raw[ idx ];
+    wii_values( idx ) = wii_values_raw[ idx ];
+  }
+
+  MatrixXd A = MatrixXd::Ones( scale_values.rows(), 3 );
+  A.col(0) = wii_values.asDiagonal()*wii_values;
+  A.col(1) = wii_values;
+
+  return (A.adjoint() * A).llt().solve( A.adjoint() * scale_values );
 }
 
 static void Run( ::xwii_iface *iface )
@@ -91,6 +124,8 @@ static void Run( ::xwii_iface *iface )
   {
 		ERROR("Cannot initialize hotplug watch descriptor");
   }
+
+  VectorXd coefs = GetCalibrationCoefficients();
 
 	while (true) {
     ret = poll(fds, fds_num, -1);
@@ -142,7 +177,7 @@ static void Run( ::xwii_iface *iface )
       INFO( "Classic controller event" );
       break;
     case XWII_EVENT_BALANCE_BOARD:
-      HandleBalanceBoard( event );
+      HandleBalanceBoard( event, coefs );
       break;
     case XWII_EVENT_PRO_CONTROLLER_KEY:
     case XWII_EVENT_PRO_CONTROLLER_MOVE:
