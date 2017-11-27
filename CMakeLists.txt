@@ -1,7 +1,9 @@
-cmake_minimum_required (VERSION 2.6)
+cmake_minimum_required (VERSION 3.5)
 
-set (PROJECT_NAME MyProject)
-project (${PROJECT_NAME})
+set( PROJECT_NAME wiight )
+project( ${PROJECT_NAME} )
+
+find_package( Eigen3 3.3 REQUIRED NO_MODULE )
 
 ## Set optional features.  This will show up as a preprocessor variable
 option (USE_GLIBCXX_DEBUG 
@@ -41,16 +43,19 @@ set (LIBS
   pthread
   pystring
   spdlog
+  xwiimote
+  Eigen3::Eigen
   )
 
-add_executable (${PROJECT_NAME} 
+add_executable( ${PROJECT_NAME} 
   src/logging.cc
   src/main.cc
   src/stacktrace.cc
   )
-target_link_libraries (${PROJECT_NAME} 
+target_link_libraries( ${PROJECT_NAME} 
   ${EXTRA_LIBS} 
-  ${LIBS})
+  ${LIBS}
+  )
 
 # Compile flags
 SET (CMAKE_C_FLAGS                "-Wall -std=c11 -Wextra -Werror")
