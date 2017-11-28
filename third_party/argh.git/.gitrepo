@@ -1,0 +1,11 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = git@github.com:adishavit/argh.git
+	branch = master
+	commit = 34e8d44e045538d90d1336504ff1f31b8adf8d68
+	parent = 37c5e01cf282c2eeae0b75c6cbafc69dd76e88f3
+	cmdver = 0.3.1
