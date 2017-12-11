@@ -1,0 +1,11 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/criticalstack/libevhtp.git
+	branch = develop
+	commit = 8f50b8354d53f5dc7be52d7e577d89655d384af5
+	parent = 4173e3b3b3b4560f8ab616d24a7c3828aa29e8b2
+	cmdver = 0.3.1
