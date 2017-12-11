@@ -6,21 +6,28 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <Eigen/Dense>
+#include <event2/event.h>
+#include <nanomsg/nn.h>
+#include <nanomsg/pair.h>
+#include <nanomsg/reqrep.h>
+#include <nanomsg/ws.h>
 #include <sqlite3.h>
 #include <xwiimote.h>
 
 #include <argh.h>
-#include <sqlite_modern_cpp.h>
-#include <event2/event.h>
 #include <evhtp.h>
+#include <json.hpp>
+#include <sqlite_modern_cpp.h>
 
 #include "logging.h"
 
 using namespace std;
 using namespace Eigen;
+using json = nlohmann::json;
 namespace fs = std::experimental::filesystem;
 
 #define CHECKSQL(X, db, msg) do { int rc = X; if( rc != SQLITE_OK ) { \
@@ -315,7 +322,7 @@ void SigintHandler( evutil_socket_t fd, short event, void *arg )
   (void) fd;
   (void) event;
   evbase_t *evbase =  reinterpret_cast<evbase_t*>( arg );
-  INFO( "Got SIGINT, bye bye!" );
+  INFO( "Got SIGINT" );
   s_should_quit = true;
   event_base_loopbreak( evbase );
 }
@@ -345,7 +352,75 @@ int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
 
-  HttpLoop();
+  int socket = nn_socket( AF_SP, NN_REP );
+  if( socket < 0 )
+  {
+    ERROR( "nn_socket failed: {}", nn_strerror( nn_errno() ));
+    return -1;
+  }
+  int opt = NN_WS_MSG_TYPE_TEXT;
+  //nn_setsockopt( socket, NN_WS, NN_WS_MSG_TYPE, &opt, sizeof(opt) );
+  opt = 500;
+  nn_setsockopt( socket, NN_SOL_SOCKET, NN_SNDTIMEO, &opt, sizeof(opt) );
+  int endpoint_id = nn_bind( socket, "ws://*:8081" );
+  if( endpoint_id < 0 )
+  {
+    ERROR( "nn_bind failed: {}", nn_strerror( nn_errno() ));
+    return -1;
+  }
+
+  INFO( "Started NN WebSocket on port 8081" );
+
+  thread http_thread( HttpLoop );
+
+  while( 1 )
+  {
+    char *buf = nullptr;
+    INFO( "Waiting on message" );
+    int bytes = nn_recv( socket, &buf, NN_MSG, 0 );
+    if( bytes >= 0 )
+    {
+      // Enforce c-string
+      if( buf[bytes-1] != '\0' ) { buf[bytes-1] = '\0'; }
+      auto j = json::parse( buf );
+      nn_freemsg( buf );
+
+      json r;
+      string request = j["request"];
+      if( request == "get_users" )
+      {
+        json users;
+        json user;
+        user["name"] = "jim";
+        user["age"] = 33;
+        user["weight"] = 185;
+        user["id"] = 1;
+        users.push_back( user );
+
+        r["response"] = "all_users";
+        r["users"] = users;
+      }
+
+      string response = r.dump();
+      bytes = nn_send( socket, response.c_str(), response.size()+1, 0 );
+      if( bytes < 0 )
+      {
+        WARN( "nn_send??: {}", nn_strerror( nn_errno() ));
+      }
+      else
+      {
+        INFO( "Sent reply: {}", response );
+      }
+
+    }
+    else
+    {
+      break;
+    }
+  }
+
+  http_thread.join();
+  INFO( "Goodbye, user" );
   return 0;
 
   auto iface = WaitForBalanceBoard();

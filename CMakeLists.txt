@@ -52,6 +52,7 @@ set (LIBS
   Eigen3::Eigen
   evhtp
   stdc++fs
+  nanomsg
   )
 
 add_executable( ${PROJECT_NAME} 
