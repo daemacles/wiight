@@ -198,6 +198,14 @@ endif()
 
 add_library           (evhtp ${EVHTP_LIBTYPE} ${LIBEVHTP_SOURCE_FILES})
 target_link_libraries (evhtp ${LIBEVHTP_EXTERNAL_LIBS})
+target_include_directories( evhtp
+  INTERFACE
+    ${PROJECT_BINARY_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
+    ${OPENSSL_INCLUDE_DIRS}
+    ${ONIGURUMA_INCLUDE_DIRS}
+    ${LIBEVENT_INCLUDE_DIRS}
+)
 
 if (EVHTP_BUILD_SHARED)
         set_target_properties(evhtp PROPERTIES VERSION "${PROJECT_VERSION}" SOVERSION 0 OUTPUT_NAME "evhtp")
