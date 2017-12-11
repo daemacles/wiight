@@ -1,6 +1,9 @@
 #include <cassert>
 #include <poll.h>
+#include <signal.h>
 
+#include <experimental/filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -9,16 +12,22 @@
 #include <sqlite3.h>
 #include <xwiimote.h>
 
+#include <argh.h>
+#include <sqlite_modern_cpp.h>
+#include <event2/event.h>
+#include <evhtp.h>
+
 #include "logging.h"
-#include "sqlite_modern_cpp.h"
 
 using namespace std;
 using namespace Eigen;
+namespace fs = std::experimental::filesystem;
 
 #define CHECKSQL(X, db, msg) do { int rc = X; if( rc != SQLITE_OK ) { \
   FATAL( "{}: {}", msg, sqlite3_errmsg( db )); }} while(0)
 
 static constexpr const char *DATABASE = "/tmp/db.sqlite";
+static bool s_should_quit = false;
 
 static xwii_iface* WaitForBalanceBoard ()
 {
@@ -114,28 +123,30 @@ VectorXd GetCalibrationCoefficients ( sqlite::database &db )
   return (A.adjoint() * A).llt().solve( A.adjoint() * scale_values );
 }
 
-static void Run( sqlite::database &db, ::xwii_iface *iface )
+static VectorXd Sample( sqlite::database &db, ::xwii_iface *iface, int num )
 {
   ::xwii_event event;
-  	int ret = 0, fds_num;
-	struct pollfd fds[2];
+  int ret = 0;
+  int fds_num;
+  struct pollfd fds[2];
 
-	memset(fds, 0, sizeof(fds));
-	fds[0].fd = 0;
-	fds[0].events = POLLIN;
-	fds[1].fd = ::xwii_iface_get_fd(iface);
-	fds[1].events = POLLIN;
-	fds_num = 2;
+  memset(fds, 0, sizeof(fds));
+  fds[0].fd = 0;
+  fds[0].events = POLLIN;
+  fds[1].fd = ::xwii_iface_get_fd(iface);
+  fds[1].events = POLLIN;
+  fds_num = 2;
 
-	ret = xwii_iface_watch(iface, true);
-	if (ret)
+  ret = xwii_iface_watch(iface, true);
+  if (ret)
   {
-		ERROR("Cannot initialize hotplug watch descriptor");
+    ERROR("Cannot initialize hotplug watch descriptor");
   }
 
   VectorXd coefs = GetCalibrationCoefficients( db );
 
-	while (true) {
+  vector<double> raw_weights;
+  while (num--) {
     ret = poll(fds, fds_num, -1);
     if (ret < 0) {
       if (errno != EINTR) {
@@ -155,56 +166,52 @@ static void Run( sqlite::database &db, ::xwii_iface *iface )
       }
     }
 
-    switch (event.type) {
-    case XWII_EVENT_GONE:
-      INFO("Device gone");
-      fds[1].fd = -1;
-      fds[1].events = 0;
-      fds_num = 1;
-      break;
-    case XWII_EVENT_WATCH:
-      break;
-    case XWII_EVENT_KEY:
-      INFO( "Key event" );
-      break;
-    case XWII_EVENT_ACCEL:
-      INFO( "Accel event" );
-      break;
-    case XWII_EVENT_IR:
-      INFO( "IR event" );
-      break;
-    case XWII_EVENT_MOTION_PLUS:
-      INFO( "Motion+ event" );
-      break;
-    case XWII_EVENT_NUNCHUK_KEY:
-    case XWII_EVENT_NUNCHUK_MOVE:
-      INFO( "Nunchuk event" );
-      break;
-    case XWII_EVENT_CLASSIC_CONTROLLER_KEY:
-    case XWII_EVENT_CLASSIC_CONTROLLER_MOVE:
-      INFO( "Classic controller event" );
-      break;
-    case XWII_EVENT_BALANCE_BOARD:
+    if( event.type == XWII_EVENT_BALANCE_BOARD )
+    {
+      Eigen::Vector4d values;
+      values <<
+        event.v.abs[0].x, event.v.abs[1].x, event.v.abs[2].x, event.v.abs[3].x;
+
+      values = values / 100.0 * 2.20462;
+      double weight = values.sum();
+      weight = coefs[0]*weight*weight + coefs[1]*weight + coefs[2];
+
+      raw_weights.push_back( weight );
+
+      fmt::print( "Values: {:6.2f} <== {:6.2f} {:6.2f} {:6.2f} {:6.2f}\r",
+                 weight, values[0], values[1], values[2], values[3] );
+      std::cout << std::flush;
+
       HandleBalanceBoard( event, coefs );
-      break;
-    case XWII_EVENT_PRO_CONTROLLER_KEY:
-    case XWII_EVENT_PRO_CONTROLLER_MOVE:
-      INFO( "Pro controller event" );
-      break;
-    case XWII_EVENT_GUITAR_KEY:
-    case XWII_EVENT_GUITAR_MOVE:
-      INFO( "Guitar event" );
-      break;
-    case XWII_EVENT_DRUMS_KEY:
-    case XWII_EVENT_DRUMS_MOVE:
-      INFO( "Drums event" );
-      break;
     }
   }
+
+  VectorXd weights( raw_weights.size() );
+  for( size_t i=0; i < raw_weights.size(); ++i )
+  {
+    weights(i) = raw_weights[i];
+  }
+
+  return weights;
 }
 
 void LoadDefaultCalibration ( sqlite::database &db )
 {
+  bool has_calibration_data = false;
+  db << "SELECT name FROM sqlite_master WHERE type='table' AND name='calibration';"
+    >> [&has_calibration_data]( string name ) {
+      (void) name;
+      has_calibration_data = true;
+    };
+
+  if( has_calibration_data ) {
+    return;
+  }
+  else
+  {
+    WARN( "Missing calibration data, loading default values." );
+  }
+
   db << "DROP TABLE IF EXISTS calibration;";
   db << "CREATE TABLE calibration( "
     "id INTEGER PRIMARY KEY,"
@@ -236,10 +243,110 @@ sqlite::database Sqlite()
   return db;
 }
 
+struct Header
+{
+  string key;
+  string value;
+};
+
+void RootCallback( evhtp_request_t *req, void *data )
+{
+  (void) data;
+
+  if( req->uri->path->full )
+  {
+    INFO( "Got a request for '{}'", req->uri->path->full );
+  }
+  else
+  {
+    INFO( "Unknown query" );
+    evhtp_send_reply( req, EVHTP_RES_NOTFOUND );
+    return;
+  }
+
+  string response = R"(
+  <html>
+  <head>
+  <title>Unknown Resource</title>
+  </head>
+  <body>
+  <h1>Unknown Resource</h1>
+  <p><a href="/">Go Home</a></p>
+  </body>
+  </html>
+  )";
+
+  fs::path file_path{ "."s + req->uri->path->full };
+  if( file_path == fs::path( "./" ))
+  {
+    file_path = { "./index.html" };
+  }
+
+  if( fs::exists( file_path ) && fs::is_regular_file( file_path ))
+  {
+    ifstream file_in{ file_path };
+    ostringstream buf;
+    buf << file_in.rdbuf();
+    response = buf.str();
+  }
+  else
+  {
+    WARN( "Unknown path '{}', using default message", file_path );
+  }
+
+  evbuffer_add( req->buffer_out, response.c_str(), response.size() );
+
+  Header headers[] = {
+    { "Content-Type", "text/html" },
+    { "Content-Language", "en" }
+  };
+  for( const auto& header : headers )
+  {
+    evhtp_headers_add_header( req->headers_out, evhtp_header_new(
+            header.key.c_str(), header.value.c_str(), 1, 1 ));
+  }
+
+  evhtp_send_reply( req, EVHTP_RES_OK );
+}
+
+
+void SigintHandler( evutil_socket_t fd, short event, void *arg )
+{
+  (void) fd;
+  (void) event;
+  evbase_t *evbase =  reinterpret_cast<evbase_t*>( arg );
+  INFO( "Got SIGINT, bye bye!" );
+  s_should_quit = true;
+  event_base_loopbreak( evbase );
+}
+
+void HttpLoop ()
+{
+  evbase_t *evbase = event_base_new();
+  evhtp_t *htp = evhtp_new( evbase, nullptr );
+  evhtp_set_glob_cb( htp, "*", RootCallback, nullptr );
+
+  evhtp_bind_socket( htp, "0.0.0.0", 8080, 2048 );
+
+  event *signal_int = evsignal_new( evbase, SIGINT, SigintHandler, evbase );
+  event_add( signal_int, nullptr );
+  INFO( "Started HTTP server on port 8080" );
+  event_base_loop( evbase, 0 );
+
+  evhtp_unbind_socket( htp );
+  event_free( signal_int );
+  evhtp_free( htp );
+  event_base_free( evbase );
+  INFO( "Stopped HTTP server" );
+}
+
 int main(int argc, char **argv) {
   // DELETE THESE.  Used to suppress unused variable warnings.
   (void)argc;
   (void)argv;
+
+  HttpLoop();
+  return 0;
 
   auto iface = WaitForBalanceBoard();
 
@@ -256,7 +363,7 @@ int main(int argc, char **argv) {
 
   auto db = Sqlite();
   LoadDefaultCalibration( db );
-  Run( db, iface );
+  Sample( db, iface, 100 );
 
   return 0;
 }
